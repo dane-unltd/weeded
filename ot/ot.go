@@ -1,224 +1,201 @@
 package ot
 
 import (
+	"bytes"
 	"errors"
 )
 
-//Represents an operational transformation which is either an Insert or a
-//Delete or a list of operations
-type Operation interface {
-	Apply(buf []byte) ([]byte, error)
-	After(ot Operation) Operation
-	Inverse() Operation
-}
+type OpType int8
 
-//Op which is a list of operations
-type List []Operation
+const (
+	Insert (OpType) = 1
+	Delete          = -1
+)
 
-func (l List) Apply(buf []byte) ([]byte, error) {
-	var err error
-	for i, op := range l {
-		buf, err = op.Apply(buf)
-		if err != nil {
-			for j := i - 1; j >= 0; j-- {
-				buf, _ = op.Inverse().Apply(buf)
-			}
-			return buf, err
-		}
-	}
-	return buf, nil
-}
-
-func (l List) Inverse() Operation {
-	inv := make(List, len(l))
-	for i := range inv {
-		inv[i] = l[len(l)-1-i].Inverse()
-	}
-	return inv
-}
-
-func (l List) After(op Operation) Operation {
-	newl := make(List, len(l))
-	for i, lop := range l {
-		for j := i - 1; j >= 0; j-- {
-			lop = lop.After(l[i].Inverse())
-		}
-		lop = lop.After(op)
-		for j := 0; j < i; j++ {
-			lop = lop.After(newl[i])
-		}
-		newl[i] = lop
-	}
-	for i := 0; i < len(newl); i++ {
-		if newl[i] == nil {
-			copy(newl[i:], newl[i+1:])
-			newl = newl[:len(newl)-1]
-			i--
-		}
-	}
-	return newl
-}
-
-//Delete operation
-type Delete struct {
-	SID        int
-	Start, End int
-	Text       []byte
-}
-
-func (d Delete) Apply(buf []byte) ([]byte, error) {
-	if d.Start >= len(buf) || d.End > len(buf) {
-		return nil, errors.New("ot Delete: index out of range")
-	}
-	d.Text = make([]byte, d.End-d.Start)
-	copy(d.Text, buf[d.Start:d.End])
-	copy(buf[d.Start:], buf[d.End:])
-	return buf[:len(buf)-(d.End-d.Start)], nil
-}
-
-func (d Delete) Inverse() Operation {
-	return Insert{SID: d.SID, Pos: d.Start, Text: d.Text}
-}
-
-func (d Delete) After(ot Operation) Operation {
-	switch ot := ot.(type) {
-	case Delete:
-		td := d
-		l := ot.End - ot.Start
-
-		if td.Start >= ot.End {
-			td.Start -= l
-		} else if td.Start >= ot.Start {
-			td.Start = ot.Start
-		}
-
-		if td.End >= ot.End {
-			td.End -= l
-		} else if td.End >= ot.Start {
-			td.End = ot.Start
-		}
-
-		if td.Start == td.End {
-			return nil
-		}
-		return td
-	case Insert:
-		l := len(ot.Text)
-		if ot.Pos > d.Start && ot.Pos < d.End {
-			ret := make(List, 2)
-			ret[0] = Delete{SID: d.SID, Start: d.Start, End: ot.Pos}
-			ret[1] = Delete{SID: d.SID, Start: d.Start + l, End: d.End - (ot.Pos - d.Start) - l}
-			return ret
-		}
-		if ot.Pos <= d.Start {
-			return Delete{SID: d.SID, Start: d.Start + l, End: d.End + l}
-		}
-		return d
-	case List:
-		var ret Operation
-		ret = d
-		for _, oti := range ot {
-			ret = ret.After(oti)
-		}
-		return ret
-	}
-	panic("unreachable")
-	return nil
-}
-
-//Insert operation
-type Insert struct {
-	SID  int
+type Block struct {
 	Pos  int
 	Text []byte
 }
 
-func (in Insert) Apply(buf []byte) ([]byte, error) {
-	space := cap(buf) - len(buf)
-	if in.Pos > len(buf) {
-		return nil, errors.New("ot Insert: index out of range")
-	}
-	if space < len(in.Text) {
-		ret := make([]byte, (len(buf)+len(in.Text))*3/2)
-		copy(ret, buf[:in.Pos])
-		copy(ret[in.Pos:], in.Text)
-		copy(ret[in.Pos+len(in.Text):], buf[in.Pos:])
-		return ret, nil
-	}
-
-	buf = buf[:len(buf)+len(in.Text)]
-
-	copy(buf[in.Pos+len(in.Text):], buf[in.Pos:])
-	copy(buf[in.Pos:], in.Text)
-
-	return buf, nil
+type Operation struct {
+	Ix     int
+	OpType OpType
+	UID    int
+	Blocks []Block //Sortet list with highest Pos first. Non-overlapping in case of Delete.
 }
 
-func (in Insert) After(ot Operation) Operation {
-	switch ot := ot.(type) {
-	case Delete:
-		ret := in
-		if in.Pos <= ot.Start {
+func (o Operation) Inverse() Operation {
+	ret := o
+	ret.OpType = -ret.OpType
+	ret.Blocks = make([]Block, len(o.Blocks))
+
+	cum := 0
+	for i := len(o.Blocks) - 1; i >= 0; i-- {
+		ret.Blocks[i] = o.Blocks[i]
+		ret.Blocks[i].Pos += int(o.OpType) * cum
+		cum += len(o.Blocks[i].Text)
+	}
+
+	return ret
+}
+
+func (o1 Operation) After(o2 Operation) Operation {
+	ret := o1
+	ret.Blocks = make([]Block, len(o1.Blocks))
+	copy(ret.Blocks, o1.Blocks)
+
+	minPos := o2.Blocks[len(o2.Blocks)-1].Pos
+
+	for i1 := 0; i1 < len(ret.Blocks); i1++ {
+		b1 := ret.Blocks[i1]
+		switch ret.OpType {
+		case Insert:
+			if b1.Pos < minPos {
+				return ret
+			}
+			for _, b2 := range o2.Blocks {
+				switch o2.OpType {
+				case Insert:
+					if b1.Pos < b2.Pos || (b1.Pos == b2.Pos && o1.UID < o2.UID) {
+						continue
+					}
+					ret.Blocks[i1].Pos += len(b2.Text)
+				case Delete:
+					if b1.Pos <= b2.Pos {
+						continue
+					}
+					if b1.Pos >= b2.Pos+len(b2.Text) {
+						ret.Blocks[i1].Pos -= len(b2.Text)
+					} else {
+						ret.Blocks[i1].Pos = b2.Pos
+					}
+				}
+			}
+			return ret
+		case Delete:
+			if b1.Pos+len(b1.Text) <= minPos {
+				return ret
+			}
+			for _, b2 := range o2.Blocks {
+				if b1.Pos+len(b1.Text) <= b2.Pos {
+					continue
+				}
+				switch o2.OpType {
+				case Insert:
+					if b1.Pos >= b2.Pos {
+						ret.Blocks[i1].Pos += len(b2.Text)
+					} else {
+						//Split Delete operation
+						diff := b2.Pos - b1.Pos
+						tmp := make([]Block, len(ret.Blocks)+1)
+						copy(tmp[:i1], ret.Blocks[:i1])
+						copy(tmp[i1+2:], ret.Blocks[i1+1:])
+						tmp[i1+1] = Block{Pos: b1.Pos, Text: b1.Text[:diff]}
+						tmp[i1] = Block{Pos: b2.Pos + len(b2.Text), Text: b1.Text[diff:]}
+						ret.Blocks = tmp
+						b1 = ret.Blocks[i1]
+					}
+				case Delete:
+					if b1.Pos >= b2.Pos+len(b2.Text) {
+						ret.Blocks[i1].Pos -= len(b2.Text)
+					} else {
+						//Need to remove some of the Text
+						left := b2.Pos - b1.Pos
+						if left < 0 {
+							left = 0
+							ret.Blocks[i1].Pos = b2.Pos
+						}
+						right := b2.Pos + len(b2.Text) - b1.Pos
+						if right > len(b1.Text) {
+							right = len(b1.Text)
+						}
+						copy(b1.Text[left:], b1.Text[right:])
+						ret.Blocks[i1].Text = b1.Text[:len(b1.Text)-(right-left)]
+					}
+				}
+			}
 			return ret
 		}
-		if in.Pos >= ot.End {
-			ret.Pos -= ot.End - ot.Start
-			return ret
-		}
-		ret.Pos = ot.Start
-		return ret
+	}
+	panic("Operation type not specified")
+}
+
+func (op Operation) Apply(buf []byte) ([]byte, error) {
+	switch op.OpType {
 	case Insert:
-		if ot.Pos > in.Pos {
-			return in
+		if op.Blocks[0].Pos > len(buf) {
+			return nil, errors.New("Insert: index out of range")
 		}
-		if ot.Pos == in.Pos && in.SID < ot.SID {
-			return in
+		space := cap(buf) - len(buf)
+		cum := 0
+		offsets := make([]int, len(op.Blocks))
+		for i := len(op.Blocks) - 1; i >= 0; i-- {
+			b := op.Blocks[i]
+			cum += len(b.Text)
+			offsets[i] = cum
 		}
-		ret := in
-		ret.Pos = in.Pos + len(ot.Text)
-		return ret
-	case List:
-		var ret Operation
-		ret = in
-		for _, oti := range ot {
-			ret = ret.After(oti)
+		var ret []byte
+		if space < cum {
+			ret = make([]byte, len(buf)+cum, (len(buf)+cum)*3/2)
+			copy(ret, buf[:op.Blocks[len(op.Blocks)-1].Pos])
+		} else {
+			ret = buf[:len(buf)+cum]
 		}
-		return ret
+		prevPos := len(buf)
+		for i, b := range op.Blocks {
+			offs := offsets[i]
+			copy(ret[b.Pos+offs:prevPos+offs], buf[b.Pos:prevPos])
+			copy(ret[b.Pos+offs-len(b.Text):], b.Text)
+			prevPos = b.Pos
+		}
+
+		return ret, nil
+	case Delete:
+		if op.Blocks[0].Pos+len(op.Blocks[0].Text) > len(buf) {
+			return nil, errors.New("Delete: index out of range")
+		}
+		for _, b := range op.Blocks {
+			if bytes.Compare(b.Text, buf[b.Pos:b.Pos+len(b.Text)]) != 0 {
+				return nil, errors.New("Delete: Text does not match")
+			}
+		}
+		for _, b := range op.Blocks {
+			copy(buf[b.Pos:], buf[b.Pos+len(b.Text):])
+			buf = buf[:len(buf)-len(b.Text)]
+		}
+		return buf, nil
 	}
-	panic("unreachable")
-	return nil
+	return nil, errors.New("Operation type not specified")
 }
 
-func (in Insert) Inverse() Operation {
-	return Delete{SID: in.SID, Start: in.Pos, End: in.Pos + len(in.Text), Text: in.Text}
+//Representation for a text buffer
+type Buffer struct {
+	Initial []byte      //initial state
+	Current []byte      //current state
+	Hist    []Operation //list of operations
 }
 
-//Representation for a text file
-type File struct {
-	Initial []byte //initial state
-	Current []byte //current state
-	Hist    List   //list of operations
-}
-
-func NewFile(buf []byte) *File {
+func NewBuffer(buf []byte) *Buffer {
 	current := make([]byte, len(buf))
 	copy(current, buf)
-	return &File{
+	return &Buffer{
 		Initial: buf,
 		Current: current,
-		Hist:    List{},
+		Hist:    []Operation{},
 	}
 }
 
-func (f *File) Apply(ot Operation, base int) (int, error) {
+func (b *Buffer) Apply(op Operation, base int) (int, error) {
 	var err error
-	for i := base; i < len(f.Hist); i++ {
-		ot = ot.After(f.Hist[i])
+	for i := base + 1; i < len(b.Hist); i++ {
+		op = op.After(b.Hist[i])
 	}
-	f.Current, err = ot.Apply(f.Current)
+	b.Current, err = op.Apply(b.Current)
 	if err != nil {
 		return 0, err
 	}
-	f.Hist = append(f.Hist, ot)
-	return len(f.Hist) - 1, nil
+	ix := len(b.Hist)
+	op.Ix = ix
+	b.Hist = append(b.Hist, op)
+	return ix, nil
 }
