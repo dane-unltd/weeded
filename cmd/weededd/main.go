@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dane-unltd/weeded"
+	"github.com/dane-unltd/weeded/ot"
 )
 
 var lg *log.Logger
@@ -19,7 +20,7 @@ func init() {
 }
 
 func main() {
-	addr := "/tmp/auth.sock"
+	addr := "/tmp/weeded.sock"
 	netw := "unix"
 	if len(os.Args) >= 3 {
 		strs := strings.Split(os.Args[2], ":")
@@ -42,15 +43,17 @@ func main() {
 	}
 
 	for {
+		var uid int
 		conn, err := ln.Accept()
 		if err != nil {
 			lg.Println(err)
 		}
-		go handleClient(conn)
+		uid++
+		go handleClient(conn, uid)
 	}
 }
 
-func handleClient(conn net.Conn) {
+func handleClient(conn net.Conn, uid int) {
 	dec := json.NewDecoder(conn)
 	for {
 		var msg weeded.Msg
@@ -60,9 +63,10 @@ func handleClient(conn net.Conn) {
 			return
 		}
 		switch msg.ID {
-		case "insert":
-			var ins weeded.Insert
-			err := json.Unmarshal(*msg.Data, &ins)
+		case "op":
+			var op ot.Operation
+			err := json.Unmarshal(*msg.Data, &op)
+			op.UID = uid
 			if err != nil {
 				lg.Println(err)
 				return
