@@ -24,8 +24,8 @@ func init() {
 func main() {
 	addr := "/tmp/weeded.sock"
 	netw := "unix"
-	if len(os.Args) >= 3 {
-		strs := strings.Split(os.Args[2], ":")
+	if len(os.Args) >= 2 {
+		strs := strings.SplitN(os.Args[1], ":", 2)
 		if len(strs) == 1 {
 			addr = strs[0]
 		} else {
