@@ -19,6 +19,7 @@ type Block struct {
 
 type Operation struct {
 	Ix     int
+	Base   int
 	OpType OpType
 	UID    int
 	Blocks []Block //Sortet list with highest Pos first. Non-overlapping in case of Delete.
@@ -185,9 +186,9 @@ func NewBuffer(buf []byte) *Buffer {
 	}
 }
 
-func (b *Buffer) Apply(op Operation, base int) (int, error) {
+func (b *Buffer) Apply(op Operation) (int, error) {
 	var err error
-	for i := base + 1; i < len(b.Hist); i++ {
+	for i := op.Base + 1; i < len(b.Hist); i++ {
 		op = op.After(b.Hist[i])
 	}
 	b.Current, err = op.Apply(b.Current)
