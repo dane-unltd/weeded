@@ -13,15 +13,14 @@ const (
 )
 
 type Block struct {
-	Pos  int
+	Pos  int64
 	Text []byte
 }
 
+//One operational transaction
 type Operation struct {
-	Ix     int
-	Base   int
+	UID    uint64
 	OpType OpType
-	UID    int
 	Blocks []Block //Sortet list with highest Pos first. Non-overlapping in case of Delete.
 }
 
@@ -30,11 +29,11 @@ func (o Operation) Inverse() Operation {
 	ret.OpType = -ret.OpType
 	ret.Blocks = make([]Block, len(o.Blocks))
 
-	cum := 0
+	cum := int64(0)
 	for i := len(o.Blocks) - 1; i >= 0; i-- {
 		ret.Blocks[i] = o.Blocks[i]
-		ret.Blocks[i].Pos += int(o.OpType) * cum
-		cum += len(o.Blocks[i].Text)
+		ret.Blocks[i].Pos += int64(o.OpType) * cum
+		cum += int64(len(o.Blocks[i].Text))
 	}
 
 	return ret
@@ -57,16 +56,16 @@ func (o1 Operation) After(o2 Operation) Operation {
 			for _, b2 := range o2.Blocks {
 				switch o2.OpType {
 				case Insert:
-					if b1.Pos < b2.Pos || (b1.Pos == b2.Pos && o1.UID < o2.UID) {
+					if b1.Pos <= b2.Pos || (b1.Pos == b2.Pos && o1.UID < o2.UID) {
 						continue
 					}
-					ret.Blocks[i1].Pos += len(b2.Text)
+					ret.Blocks[i1].Pos += int64(len(b2.Text))
 				case Delete:
 					if b1.Pos <= b2.Pos {
 						continue
 					}
-					if b1.Pos >= b2.Pos+len(b2.Text) {
-						ret.Blocks[i1].Pos -= len(b2.Text)
+					if b1.Pos >= b2.Pos+int64(len(b2.Text)) {
+						ret.Blocks[i1].Pos -= int64(len(b2.Text))
 					} else {
 						ret.Blocks[i1].Pos = b2.Pos
 					}
@@ -74,17 +73,17 @@ func (o1 Operation) After(o2 Operation) Operation {
 			}
 			return ret
 		case Delete:
-			if b1.Pos+len(b1.Text) <= minPos {
+			if b1.Pos+int64(len(b1.Text)) <= minPos {
 				return ret
 			}
 			for _, b2 := range o2.Blocks {
-				if b1.Pos+len(b1.Text) <= b2.Pos {
+				if b1.Pos+int64(len(b1.Text)) <= b2.Pos {
 					continue
 				}
 				switch o2.OpType {
 				case Insert:
 					if b1.Pos >= b2.Pos {
-						ret.Blocks[i1].Pos += len(b2.Text)
+						ret.Blocks[i1].Pos += int64(len(b2.Text))
 					} else {
 						//Split Delete operation
 						diff := b2.Pos - b1.Pos
@@ -92,13 +91,13 @@ func (o1 Operation) After(o2 Operation) Operation {
 						copy(tmp[:i1], ret.Blocks[:i1])
 						copy(tmp[i1+2:], ret.Blocks[i1+1:])
 						tmp[i1+1] = Block{Pos: b1.Pos, Text: b1.Text[:diff]}
-						tmp[i1] = Block{Pos: b2.Pos + len(b2.Text), Text: b1.Text[diff:]}
+						tmp[i1] = Block{Pos: b2.Pos + int64(len(b2.Text)), Text: b1.Text[diff:]}
 						ret.Blocks = tmp
 						b1 = ret.Blocks[i1]
 					}
 				case Delete:
-					if b1.Pos >= b2.Pos+len(b2.Text) {
-						ret.Blocks[i1].Pos -= len(b2.Text)
+					if b1.Pos >= b2.Pos+int64(len(b2.Text)) {
+						ret.Blocks[i1].Pos -= int64(len(b2.Text))
 					} else {
 						//Need to remove some of the Text
 						left := b2.Pos - b1.Pos
@@ -106,12 +105,12 @@ func (o1 Operation) After(o2 Operation) Operation {
 							left = 0
 							ret.Blocks[i1].Pos = b2.Pos
 						}
-						right := b2.Pos + len(b2.Text) - b1.Pos
-						if right > len(b1.Text) {
-							right = len(b1.Text)
+						right := b2.Pos + int64(len(b2.Text)) - b1.Pos
+						if right > int64(len(b1.Text)) {
+							right = int64(len(b1.Text))
 						}
 						copy(b1.Text[left:], b1.Text[right:])
-						ret.Blocks[i1].Text = b1.Text[:len(b1.Text)-(right-left)]
+						ret.Blocks[i1].Text = b1.Text[:int64(len(b1.Text))-(right-left)]
 					}
 				}
 			}
@@ -121,82 +120,50 @@ func (o1 Operation) After(o2 Operation) Operation {
 	panic("Operation type not specified")
 }
 
-func (op Operation) Apply(buf []byte) ([]byte, error) {
+func (op Operation) ApplyTo(buf []byte) ([]byte, error) {
 	switch op.OpType {
 	case Insert:
-		if op.Blocks[0].Pos > len(buf) {
+		if op.Blocks[0].Pos > int64(len(buf)) {
 			return nil, errors.New("Insert: index out of range")
 		}
-		space := cap(buf) - len(buf)
-		cum := 0
-		offsets := make([]int, len(op.Blocks))
+		space := int64(cap(buf)) - int64(len(buf))
+		cum := int64(0)
+		offsets := make([]int64, len(op.Blocks))
 		for i := len(op.Blocks) - 1; i >= 0; i-- {
 			b := op.Blocks[i]
-			cum += len(b.Text)
+			cum += int64(len(b.Text))
 			offsets[i] = cum
 		}
 		var ret []byte
 		if space < cum {
-			ret = make([]byte, len(buf)+cum, (len(buf)+cum)*3/2)
+			ret = make([]byte, int64(len(buf))+cum, (int64(len(buf))+cum)*3/2)
 			copy(ret, buf[:op.Blocks[len(op.Blocks)-1].Pos])
 		} else {
-			ret = buf[:len(buf)+cum]
+			ret = buf[:int64(len(buf))+cum]
 		}
-		prevPos := len(buf)
+		prevPos := int64(len(buf))
 		for i, b := range op.Blocks {
 			offs := offsets[i]
 			copy(ret[b.Pos+offs:prevPos+offs], buf[b.Pos:prevPos])
-			copy(ret[b.Pos+offs-len(b.Text):], b.Text)
+			copy(ret[b.Pos+offs-int64(len(b.Text)):], b.Text)
 			prevPos = b.Pos
 		}
 
 		return ret, nil
 	case Delete:
-		if op.Blocks[0].Pos+len(op.Blocks[0].Text) > len(buf) {
+		if op.Blocks[0].Pos+int64(len(op.Blocks[0].Text)) > int64(len(buf)) {
 			return nil, errors.New("Delete: index out of range")
 		}
 		for _, b := range op.Blocks {
-			if bytes.Compare(b.Text, buf[b.Pos:b.Pos+len(b.Text)]) != 0 {
+			if bytes.Compare(b.Text, buf[b.Pos:b.Pos+int64(len(b.Text))]) != 0 {
 				return nil, errors.New("Delete: Text does not match")
 			}
 		}
 		for _, b := range op.Blocks {
-			copy(buf[b.Pos:], buf[b.Pos+len(b.Text):])
+			copy(buf[b.Pos:], buf[b.Pos+int64(len(b.Text)):])
 			buf = buf[:len(buf)-len(b.Text)]
 		}
 		return buf, nil
 	}
 	return nil, errors.New("Operation type not specified")
-}
-
-//Representation for a text buffer
-type Buffer struct {
-	Initial []byte      //initial state
-	Current []byte      //current state
-	Hist    []Operation //list of operations
-}
-
-func NewBuffer(buf []byte) *Buffer {
-	current := make([]byte, len(buf))
-	copy(current, buf)
-	return &Buffer{
-		Initial: buf,
-		Current: current,
-		Hist:    []Operation{},
-	}
-}
-
-func (b *Buffer) Apply(op Operation) (int, error) {
-	var err error
-	for i := op.Base + 1; i < len(b.Hist); i++ {
-		op = op.After(b.Hist[i])
-	}
-	b.Current, err = op.Apply(b.Current)
-	if err != nil {
-		return 0, err
-	}
-	ix := len(b.Hist)
-	op.Ix = ix
-	b.Hist = append(b.Hist, op)
-	return ix, nil
 }

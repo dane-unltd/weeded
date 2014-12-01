@@ -6,9 +6,10 @@ import (
 )
 
 func TestOT(t *testing.T) {
-	b := NewBuffer([]byte("Hello World!"))
+	b := []byte("Hello World!")
 
 	op := Operation{
+		UID:    0,
 		OpType: Insert,
 		Blocks: []Block{
 			{Pos: 6, Text: []byte("wide ")},
@@ -17,35 +18,45 @@ func TestOT(t *testing.T) {
 	}
 
 	op2 := Operation{
+		UID:    1,
 		OpType: Insert,
 		Blocks: []Block{
-			{Pos: len(b.Current), Text: []byte(" and stuff")},
+			{Pos: int64(len(b)), Text: []byte(" and stuff")},
 		},
 	}
 
-	fmt.Println(string(b.Current))
+	fmt.Println(string(b))
 
-	ix, err := b.Apply(op, -1)
+	var err error
+	b, err = op.ApplyTo(b)
 	if err != nil {
 		t.Error(err)
 	}
 
-	ix2, err := b.Apply(op2, -1)
+	op2 = op2.After(op)
+
+	b, err = op2.ApplyTo(b)
 	if err != nil {
 		t.Error(err)
 	}
 
-	fmt.Println(string(b.Current))
+	fmt.Println(string(b))
 
-	_, err = b.Apply(b.Hist[ix].Inverse(), ix)
+	opinv := op.Inverse()
+	opinv = opinv.After(op2)
+
+	b, err = opinv.ApplyTo(b)
 	if err != nil {
 		t.Error(err)
 	}
 
-	_, err = b.Apply(b.Hist[ix2].Inverse(), ix2)
+	op2inv := op2.Inverse()
+	op2inv = op2inv.After(opinv)
+
+	b, err = op2inv.ApplyTo(b)
 	if err != nil {
 		t.Error(err)
 	}
 
-	fmt.Println(string(b.Current))
+	fmt.Println(string(b))
 }

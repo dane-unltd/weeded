@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dane-unltd/msglog"
 	"github.com/dane-unltd/weeded"
 	"github.com/dane-unltd/weeded/ot"
 )
