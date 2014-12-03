@@ -3,7 +3,6 @@ package weeded
 import (
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/dane-unltd/weeded/ot"
 )
@@ -17,13 +16,22 @@ func TestFile(t *testing.T) {
 	op := ot.Operation{
 		OpType: ot.Insert,
 		Blocks: []ot.Block{
-			{Pos: 0, Text: []byte("Hello World!")},
+			{Pos: 0, Text: []byte("Hello World!\n")},
 		},
 	}
 
-	f.Apply(op, -1)
+	f.Apply(op, 0)
+
+	op = ot.Operation{
+		OpType: ot.Insert,
+		Blocks: []ot.Block{
+			{Pos: 6, Text: []byte("wide ")},
+		},
+	}
+
+	f.Apply(op, 1)
+
+	f.Close()
 
 	fmt.Println(string(f.buf))
-
-	time.Sleep(time.Second)
 }

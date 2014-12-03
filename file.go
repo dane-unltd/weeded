@@ -2,7 +2,6 @@ package weeded
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -12,8 +11,8 @@ import (
 )
 
 type OtMsg struct {
-	Base int64
-	Op   ot.Operation
+	Ix int64
+	Op ot.Operation
 }
 
 type File struct {
@@ -24,12 +23,12 @@ type File struct {
 	buf      []byte
 	ots      chan OtMsg
 	full     chan io.Writer
-	otPos    int64
+	quit     chan chan struct{}
+	nextIx   int64
 }
 
 func NewFile(filename string) (*File, error) {
 	l, err := msglog.Recover(filename + ".master.weeded")
-	fmt.Println(l, err)
 	if err != nil {
 		return nil, err
 	}
@@ -61,11 +60,12 @@ func NewFile(filename string) (*File, error) {
 		if err != nil {
 			return nil, err
 		}
-		f.otPos++
+		f.nextIx++
 	}
 	f.consumer = c
 	f.ots = make(chan OtMsg)
 	f.full = make(chan io.Writer)
+	f.quit = make(chan chan struct{})
 	f.filename = filename
 
 	go f.controller()
@@ -74,36 +74,39 @@ func NewFile(filename string) (*File, error) {
 }
 
 func (f *File) controller() {
-	defer f.Close()
 	c := f.consumer
 	for {
 		select {
 		case otmsg := <-f.ots:
 			var err error
 			op := otmsg.Op
-			if otmsg.Base < f.otPos {
-				seq := otmsg.Base + 1
+			if otmsg.Ix < f.nextIx {
+				seq := otmsg.Ix
 				err = c.Goto(uint64(seq))
 				if err != nil {
 					log.Println(err)
+					f.closeAll()
 					return
 				}
 
 				var oldop ot.Operation
-				for seq <= f.otPos {
+				for seq < f.nextIx {
 					_, err := c.Next()
 					if err != nil {
 						log.Println(err)
+						f.closeAll()
 						return
 					}
 					pl, err := c.Payload()
 					if err != nil {
 						log.Println(err)
+						f.closeAll()
 						return
 					}
 					err = json.Unmarshal(pl, &oldop)
 					if err != nil {
 						log.Println(err)
+						f.closeAll()
 						return
 					}
 					op = op.After(oldop)
@@ -114,32 +117,44 @@ func (f *File) controller() {
 			f.buf, err = op.ApplyTo(f.buf)
 			if err != nil {
 				log.Println(err)
+				f.closeAll()
 				return
 			}
 
 			buf, err := json.Marshal(op)
 			if err != nil {
 				log.Println(err)
+				f.closeAll()
 				return
 			}
-			fmt.Println("pushing to log")
 			f.otLog.Push(msglog.Msg{From: op.UID}, buf)
-			f.otPos++
+			f.nextIx++
 
 		case w := <-f.full:
 			_, err := w.Write(f.buf)
 			if err != nil {
 				log.Println(err)
 			}
+
+		case ret := <-f.quit:
+			f.closeAll()
+			ret <- struct{}{}
+			return
 		}
 	}
 }
 
-func (f *File) Apply(op ot.Operation, base int64) {
-	f.ots <- OtMsg{Op: op, Base: base}
+func (f *File) Apply(op ot.Operation, ix int64) {
+	f.ots <- OtMsg{Op: op, Ix: ix}
 }
 
 func (f *File) Close() {
+	ret := make(chan struct{})
+	f.quit <- ret
+	<-ret
+}
+
+func (f *File) closeAll() {
 	f.consumer.Close()
 	f.otLog.Close()
 	err := ioutil.WriteFile(f.filename, f.buf, 0744)
