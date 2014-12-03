@@ -31,7 +31,6 @@ func TestFile(t *testing.T) {
 
 	f.Apply(op, 1)
 
+	fmt.Println(string(f.Bytes()))
 	f.Close()
-
-	fmt.Println(string(f.buf))
 }

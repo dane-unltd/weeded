@@ -117,9 +117,9 @@ func (b *Buffer) Apply(op *ot.Operation) {
 }
 
 type Aquire struct {
-	f    *string
-	conn Conn
-	ret  chan<- *Buffer
+	f   *string
+	UID uint64
+	ret chan<- *msglog.Consumer
 }
 
 func manageBuffers(aq chan *Aquire) {

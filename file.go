@@ -2,7 +2,6 @@ package weeded
 
 import (
 	"encoding/json"
-	"io"
 	"io/ioutil"
 	"log"
 
@@ -22,7 +21,7 @@ type File struct {
 	consumer *msglog.Consumer
 	buf      []byte
 	ots      chan OtMsg
-	full     chan io.Writer
+	full     chan chan []byte
 	quit     chan chan struct{}
 	nextIx   int64
 }
@@ -64,7 +63,7 @@ func NewFile(filename string) (*File, error) {
 	}
 	f.consumer = c
 	f.ots = make(chan OtMsg)
-	f.full = make(chan io.Writer)
+	f.full = make(chan chan []byte)
 	f.quit = make(chan chan struct{})
 	f.filename = filename
 
@@ -130,12 +129,10 @@ func (f *File) controller() {
 			f.otLog.Push(msglog.Msg{From: op.UID}, buf)
 			f.nextIx++
 
-		case w := <-f.full:
-			_, err := w.Write(f.buf)
-			if err != nil {
-				log.Println(err)
-			}
-
+		case ret := <-f.full:
+			retBuf := make([]byte, len(f.buf))
+			copy(retBuf, f.buf)
+			ret <- retBuf
 		case ret := <-f.quit:
 			f.closeAll()
 			ret <- struct{}{}
@@ -146,6 +143,12 @@ func (f *File) controller() {
 
 func (f *File) Apply(op ot.Operation, ix int64) {
 	f.ots <- OtMsg{Op: op, Ix: ix}
+}
+
+func (f *File) Bytes() []byte {
+	ret := make(chan []byte)
+	f.full <- ret
+	return <-ret
 }
 
 func (f *File) Close() {
