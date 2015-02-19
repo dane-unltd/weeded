@@ -1,5 +1,9 @@
 package weeded
 
+import (
+	"github.com/dane-unltd/msglog"
+)
+
 type Aquire struct {
 	f   *string
 	UID uint64

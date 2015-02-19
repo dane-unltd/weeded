@@ -1,169 +1,381 @@
 package ot
 
 import (
-	"bytes"
 	"errors"
 )
 
-type OpType int8
-
-const (
-	Insert (OpType) = 1
-	Delete          = -1
-)
-
-type Block struct {
-	Pos  int64
-	Text []byte
+type SubOp struct {
+	N int
+	S string
 }
 
-//One operational transaction
-type Operation struct {
-	UID    uint64
-	OpType OpType
-	Blocks []Block //Sortet list with highest Pos first. Non-overlapping in case of Delete.
+type Op []SubOp
+
+func (sop SubOp) IsInsert() bool {
+	return sop.N > 0 && len(sop.S) > 0
 }
 
-func (o Operation) Inverse() Operation {
-	ret := o
-	ret.OpType = -ret.OpType
-	ret.Blocks = make([]Block, len(o.Blocks))
+func (sop SubOp) IsDelete() bool {
+	return sop.N < 0
+}
 
-	cum := int64(0)
-	for i := len(o.Blocks) - 1; i >= 0; i-- {
-		ret.Blocks[i] = o.Blocks[i]
-		ret.Blocks[i].Pos += int64(o.OpType) * cum
-		cum += int64(len(o.Blocks[i].Text))
+func (sop SubOp) IsRetain() bool {
+	return sop.N > 0 && len(sop.S) == 0
+}
+
+func (sop SubOp) IsNoop() bool {
+	return sop.N == 0
+}
+
+func (op Op) Insert(s string) Op {
+	return append(op, SubOp{N: len(s), S: s})
+}
+
+func (op Op) Delete(s string) Op {
+	return append(op, SubOp{N: -len(s), S: s})
+}
+
+func (op Op) Retain(n int) Op {
+	return append(op, SubOp{N: n})
+}
+
+func (op Op) Count() (ret, del, ins int) {
+	for _, sop := range op {
+		switch {
+		case sop.IsRetain():
+			ret += sop.N
+		case sop.IsDelete():
+			del += -sop.N
+		case sop.IsInsert():
+			ins += sop.N
+		}
 	}
+	return
+}
 
+func (op Op) Equals(other Op) bool {
+	if len(op) != len(other) {
+		return false
+	}
+	for i, o := range other {
+		if op[i] != o {
+			return false
+		}
+	}
+	return true
+}
+
+func (op Op) Squeeze() Op {
+	var ret Op
+
+	for _, sop := range op {
+		if sop.IsNoop() {
+			continue
+		}
+		i := len(ret) - 1
+		var lastOp SubOp
+		if i > -1 {
+			lastOp = ret[i]
+		}
+
+		switch {
+		case i == -1:
+			ret = append(ret, sop)
+		case lastOp.IsRetain() && sop.IsRetain():
+			ret[i].N += sop.N
+		case lastOp.IsDelete() && sop.IsDelete():
+			ret[i].N += sop.N
+			ret[i].S += sop.S
+		case lastOp.IsInsert() && sop.IsInsert():
+			ret[i].N += sop.N
+			ret[i].S += sop.S
+		case lastOp.IsDelete() && sop.IsInsert():
+			//insert always before delete
+			ret[i] = sop
+			ret = append(ret, lastOp)
+		default:
+			ret = append(ret, sop)
+		}
+	}
 	return ret
 }
 
-func (o1 Operation) After(o2 Operation) Operation {
-	ret := o1
-	ret.Blocks = make([]Block, len(o1.Blocks))
-	copy(ret.Blocks, o1.Blocks)
-
-	minPos := o2.Blocks[len(o2.Blocks)-1].Pos
-
-	for i1 := 0; i1 < len(ret.Blocks); i1++ {
-		b1 := ret.Blocks[i1]
-		switch ret.OpType {
-		case Insert:
-			if b1.Pos < minPos {
-				return ret
-			}
-			for _, b2 := range o2.Blocks {
-				switch o2.OpType {
-				case Insert:
-					if b1.Pos <= b2.Pos || (b1.Pos == b2.Pos && o1.UID < o2.UID) {
-						continue
-					}
-					ret.Blocks[i1].Pos += int64(len(b2.Text))
-				case Delete:
-					if b1.Pos <= b2.Pos {
-						continue
-					}
-					if b1.Pos >= b2.Pos+int64(len(b2.Text)) {
-						ret.Blocks[i1].Pos -= int64(len(b2.Text))
-					} else {
-						ret.Blocks[i1].Pos = b2.Pos
-					}
-				}
-			}
-			return ret
-		case Delete:
-			if b1.Pos+int64(len(b1.Text)) <= minPos {
-				return ret
-			}
-			for _, b2 := range o2.Blocks {
-				if b1.Pos+int64(len(b1.Text)) <= b2.Pos {
-					continue
-				}
-				switch o2.OpType {
-				case Insert:
-					if b1.Pos >= b2.Pos {
-						ret.Blocks[i1].Pos += int64(len(b2.Text))
-					} else {
-						//Split Delete operation
-						diff := b2.Pos - b1.Pos
-						tmp := make([]Block, len(ret.Blocks)+1)
-						copy(tmp[:i1], ret.Blocks[:i1])
-						copy(tmp[i1+2:], ret.Blocks[i1+1:])
-						tmp[i1+1] = Block{Pos: b1.Pos, Text: b1.Text[:diff]}
-						tmp[i1] = Block{Pos: b2.Pos + int64(len(b2.Text)), Text: b1.Text[diff:]}
-						ret.Blocks = tmp
-						b1 = ret.Blocks[i1]
-					}
-				case Delete:
-					if b1.Pos >= b2.Pos+int64(len(b2.Text)) {
-						ret.Blocks[i1].Pos -= int64(len(b2.Text))
-					} else {
-						//Need to remove some of the Text
-						left := b2.Pos - b1.Pos
-						if left < 0 {
-							left = 0
-							ret.Blocks[i1].Pos = b2.Pos
-						}
-						right := b2.Pos + int64(len(b2.Text)) - b1.Pos
-						if right > int64(len(b1.Text)) {
-							right = int64(len(b1.Text))
-						}
-						copy(b1.Text[left:], b1.Text[right:])
-						ret.Blocks[i1].Text = b1.Text[:int64(len(b1.Text))-(right-left)]
-					}
-				}
-			}
-			return ret
+func (op Op) Inverse() Op {
+	inv := make(Op, len(op))
+	copy(inv, op)
+	for i, sop := range inv {
+		if sop.IsInsert() || sop.IsDelete() {
+			inv[i].N = -sop.N
 		}
 	}
-	panic("Operation type not specified")
+	return inv
 }
 
-func (op Operation) ApplyTo(buf []byte) ([]byte, error) {
-	switch op.OpType {
-	case Insert:
-		if op.Blocks[0].Pos > int64(len(buf)) {
-			return nil, errors.New("Insert: index out of range")
-		}
-		space := int64(cap(buf)) - int64(len(buf))
-		cum := int64(0)
-		offsets := make([]int64, len(op.Blocks))
-		for i := len(op.Blocks) - 1; i >= 0; i-- {
-			b := op.Blocks[i]
-			cum += int64(len(b.Text))
-			offsets[i] = cum
-		}
-		var ret []byte
-		if space < cum {
-			ret = make([]byte, int64(len(buf))+cum, (int64(len(buf))+cum)*3/2)
-			copy(ret, buf[:op.Blocks[len(op.Blocks)-1].Pos])
-		} else {
-			ret = buf[:int64(len(buf))+cum]
-		}
-		prevPos := int64(len(buf))
-		for i, b := range op.Blocks {
-			offs := offsets[i]
-			copy(ret[b.Pos+offs:prevPos+offs], buf[b.Pos:prevPos])
-			copy(ret[b.Pos+offs-int64(len(b.Text)):], b.Text)
-			prevPos = b.Pos
+func subop(op Op, i int) (SubOp, int) {
+	if i >= 0 && i < len(op) {
+		return op[i], i + 1
+	}
+	return SubOp{}, i
+}
+
+func Compose(a, b Op) (Op, error) {
+	var ab Op
+
+	a = a.Squeeze()
+	b = b.Squeeze()
+
+	reta, _, ins := a.Count()
+	retb, del, _ := b.Count()
+
+	if reta+ins != retb+del {
+		return ab, errors.New("Compose requires consecutive ops")
+	}
+
+	ia, ib := 0, 0
+
+	opa, ia := subop(a, ia)
+	opb, ib := subop(b, ib)
+
+	for {
+		if opa.IsNoop() && opb.IsNoop() {
+			return ab, nil
 		}
 
-		return ret, nil
-	case Delete:
-		if op.Blocks[0].Pos+int64(len(op.Blocks[0].Text)) > int64(len(buf)) {
-			return nil, errors.New("Delete: index out of range")
+		if opa.IsDelete() {
+			ab = append(ab, opa)
+
+			opa, ia = subop(a, ia)
+			continue
 		}
-		for _, b := range op.Blocks {
-			if bytes.Compare(b.Text, buf[b.Pos:b.Pos+int64(len(b.Text))]) != 0 {
-				return nil, errors.New("Delete: Text does not match")
+		if opb.IsInsert() {
+			ab = append(ab, opb)
+
+			opb, ib = subop(b, ib)
+			continue
+		}
+
+		switch {
+		case opa.IsRetain() && opb.IsRetain():
+			switch {
+			case opa.N > opb.N:
+				ab = append(ab, opb)
+				opa.N -= opb.N
+
+				opb, ib = subop(b, ib)
+			case opa.N == opb.N:
+				ab = append(ab, opb)
+
+				opa, ia = subop(a, ia)
+				opb, ib = subop(b, ib)
+			case opa.N < opb.N:
+				ab = append(ab, opa)
+
+				opa, ia = subop(a, ia)
 			}
+		case opa.IsInsert() && opb.IsDelete():
+			switch {
+			case opa.N > -opb.N:
+				opa.N += opb.N
+				opa.S = opa.S[-opb.N:]
+
+				opb, ib = subop(b, ib)
+			case opa.N == -opb.N:
+				opa, ia = subop(a, ia)
+				opb, ib = subop(b, ib)
+			case opa.N < -opb.N:
+				opb.N += opa.N
+				opb.S = opb.S[opa.N:]
+
+				opa, ia = subop(a, ia)
+			}
+		case opa.IsInsert() && opb.IsRetain():
+			switch {
+			case opa.N > opb.N:
+				ab = ab.Insert(opa.S[:opb.N])
+				opa.N -= opb.N
+				opa.S = opa.S[opb.N:]
+
+				opb, ib = subop(b, ib)
+			case opa.N == opb.N:
+				ab = append(ab, opa)
+
+				opa, ia = subop(a, ia)
+				opb, ib = subop(b, ib)
+			case opa.N < opb.N:
+				ab = append(ab, opa)
+				opb.N -= opa.N
+
+				opa, ia = subop(a, ia)
+			}
+		case opa.IsRetain() && opb.IsDelete():
+			switch {
+			case opa.N > -opb.N:
+				ab = append(ab, opb)
+				opa.N += opb.N
+
+				opb, ib = subop(b, ib)
+			case opa.N == -opb.N:
+				ab = append(ab, opb)
+
+				opa, ia = subop(a, ia)
+				opb, ib = subop(b, ib)
+			case opa.N < -opb.N:
+				ab = ab.Delete(opb.S[:opa.N])
+				opb.N += opa.N
+				opb.S = opb.S[opa.N:]
+
+				opa, ia = subop(a, ia)
+			}
+		default:
+			panic("unreachable")
 		}
-		for _, b := range op.Blocks {
-			copy(buf[b.Pos:], buf[b.Pos+int64(len(b.Text)):])
-			buf = buf[:len(buf)-len(b.Text)]
-		}
-		return buf, nil
+
 	}
-	return nil, errors.New("Operation type not specified")
+	ab = ab.Squeeze()
+	return ab, nil
+}
+
+func Transform(a, b Op) (at Op, bt Op, err error) {
+	ia, ib := 0, 0
+	a = a.Squeeze()
+	b = b.Squeeze()
+
+	opa, ia := subop(a, ia)
+	opb, ib := subop(b, ib)
+
+	for {
+		if opa.IsNoop() && opb.IsNoop() {
+			return
+		}
+
+		if opa.IsInsert() {
+			at = append(at, opa)
+			bt = bt.Retain(opa.N)
+
+			opa, ia = subop(a, ia)
+		}
+		if opb.IsInsert() {
+			at = at.Retain(opb.N)
+			bt = append(bt, opb)
+
+			opb, ib = subop(b, ib)
+		}
+
+		switch {
+		case opa.IsRetain() && opb.IsRetain():
+			minl := 0
+			switch {
+			case opa.N > opb.N:
+				minl = opb.N
+				opa.N -= opb.N
+
+				opb, ib = subop(b, ib)
+			case opa.N == opb.N:
+				minl = opb.N
+
+				opa, ia = subop(a, ia)
+				opb, ib = subop(b, ib)
+			case opa.N < opb.N:
+				minl = opa.N
+				opb.N -= opa.N
+
+				opa, ia = subop(a, ia)
+			}
+			at = at.Retain(minl)
+			bt = bt.Retain(minl)
+		case opa.IsDelete() && opb.IsDelete():
+			switch {
+			case opa.N < opb.N:
+				opa.N -= opb.N
+				opa.S = opa.S[-opb.N:]
+
+				opb, ib = subop(b, ib)
+			case opa.N == opb.N:
+				opa, ia = subop(a, ia)
+				opb, ib = subop(b, ib)
+			case opa.N > opb.N:
+				opb.N -= opa.N
+				opb.S = opb.S[-opa.N:]
+
+				opa, ia = subop(a, ia)
+			}
+		case opa.IsDelete() && opb.IsRetain():
+			switch {
+			case -opa.N > opb.N:
+				at = at.Delete(opa.S[:opb.N])
+				opa.N += opb.N
+				opa.S = opa.S[opb.N:]
+
+				opb, ib = subop(b, ib)
+			case -opa.N == opb.N:
+				at = append(at, opa)
+
+				opa, ia = subop(a, ia)
+				opb, ib = subop(b, ib)
+			case -opa.N < opb.N:
+				at = append(at, opa)
+				opb.N += opa.N
+
+				opa, ia = subop(a, ia)
+			}
+		case opa.IsRetain() && opb.IsDelete():
+			switch {
+			case opa.N < -opb.N:
+				bt = bt.Delete(opb.S[:opa.N])
+				opb.N += opa.N
+				opb.S = opb.S[opa.N:]
+
+				opa, ia = subop(a, ia)
+			case opa.N == -opb.N:
+				bt = append(bt, opb)
+
+				opa, ia = subop(a, ia)
+				opb, ib = subop(b, ib)
+			case opa.N > -opb.N:
+				bt = append(bt, opb)
+				opa.N += opb.N
+
+				opb, ib = subop(b, ib)
+			}
+		default:
+			panic("unreachable")
+		}
+	}
+}
+
+func (op Op) ApplyTo(doc []byte) ([]byte, error) {
+	ret, del, ins := op.Count()
+
+	baseLength := ret + del
+	targetLength := ret + ins
+	workspace := ret + del + ins
+
+	if baseLength != len(doc) {
+		return nil, errors.New("The operation's base length must be equal to the documents length.")
+	}
+
+	if cap(doc) < workspace {
+		tmp := make([]byte, workspace*3/2)
+		copy(tmp, doc)
+		doc = tmp
+	}
+	doc = doc[:workspace]
+
+	docIx := 0
+	for _, sop := range op {
+		switch {
+		case sop.IsRetain():
+			docIx += sop.N
+		case sop.IsInsert():
+			copy(doc[docIx+sop.N:], doc[docIx:])
+			copy(doc[docIx:], []byte(sop.S))
+		case sop.IsDelete():
+			if sop.S != string(doc[docIx:docIx-sop.N]) {
+				return nil, errors.New("The string which should be deleted does not match the document.")
+			}
+			copy(doc[docIx:], doc[docIx-sop.N:])
+		}
+	}
+	doc = doc[:targetLength]
+	return doc, nil
 }
