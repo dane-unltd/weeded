@@ -2,6 +2,7 @@ package ot
 
 import (
 	"errors"
+	"fmt"
 )
 
 type SubOp struct {
@@ -119,6 +120,14 @@ func subop(op Op, i int) (SubOp, int) {
 }
 
 func Compose(a, b Op) (Op, error) {
+
+	if len(a) == 0 {
+		return b, nil
+	}
+	if len(b) == 0 {
+		return a, nil
+	}
+
 	var ab Op
 
 	a = a.Squeeze()
@@ -236,6 +245,10 @@ func Compose(a, b Op) (Op, error) {
 }
 
 func Transform(a, b Op) (at Op, bt Op, err error) {
+	if len(a) == 0 || len(b) == 0 {
+		return a, b, nil
+	}
+
 	ia, ib := 0, 0
 	a = a.Squeeze()
 	b = b.Squeeze()
@@ -244,6 +257,7 @@ func Transform(a, b Op) (at Op, bt Op, err error) {
 	opb, ib := subop(b, ib)
 
 	for {
+		fmt.Println(opa, opb)
 		if opa.IsNoop() && opb.IsNoop() {
 			return
 		}
@@ -253,12 +267,14 @@ func Transform(a, b Op) (at Op, bt Op, err error) {
 			bt = bt.Retain(opa.N)
 
 			opa, ia = subop(a, ia)
+			continue
 		}
 		if opb.IsInsert() {
 			at = at.Retain(opb.N)
 			bt = append(bt, opb)
 
 			opb, ib = subop(b, ib)
+			continue
 		}
 
 		switch {
